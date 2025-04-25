@@ -1,8 +1,12 @@
 import numpy as np
 import cv2 as cv
 
+from ultralytics import YOLO
 
-video_path = "video/slow_traffic_small.mp4"  # Убедитесь, что путь правильный
+frame_wid = 640
+frame_hyt = 480
+
+video_path = "video/traffic_flow.mp4"  # Убедитесь, что путь правильный
 cap = cv.VideoCapture(video_path)
 if not cap.isOpened():
     print("Ошибка загрузки видео")
@@ -13,22 +17,36 @@ feature_params = dict( maxCorners = 100,
                        minDistance = 7,
                        blockSize = 7 )
 # Parameters for lucas kanade optical flow
-lk_params = dict( winSize  = (15, 15),
+lk_params = dict( winSize  = (10, 10),
                   maxLevel = 2,
                   criteria = (cv.TERM_CRITERIA_EPS | cv.TERM_CRITERIA_COUNT, 10, 0.03))
 # Create some random colors
 color = np.random.randint(0, 255, (100, 3))
 # Take first frame and find corners in it
 ret, old_frame = cap.read()
+old_frame = cv.resize(old_frame, (frame_wid, frame_hyt))
 old_gray = cv.cvtColor(old_frame, cv.COLOR_BGR2GRAY)
 p0 = cv.goodFeaturesToTrack(old_gray, mask = None, **feature_params)
 # Create a mask image for drawing purposes
 mask = np.zeros_like(old_frame)
+
+"""with open("utils/classes.txt") as file:
+    data = file.read()
+    class_list = data.split("\n")
+
+model = YOLO("weights/yolov8n.pt", "v8")"""
+
+
+
 while(1):
+    # открываем следующий кадр
     ret, frame = cap.read()
     if not ret:
         print('No frames grabbed!')
         break
+
+    frame = cv.resize(frame, (frame_wid, frame_hyt))
+
     frame_gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
     # calculate optical flow
     p1, st, err = cv.calcOpticalFlowPyrLK(old_gray, frame_gray, p0, None, **lk_params)
@@ -40,7 +58,7 @@ while(1):
     for i, (new, old) in enumerate(zip(good_new, good_old)):
         a, b = new.ravel()
         c, d = old.ravel()
-        mask = cv.line(mask, (int(a), int(b)), (int(c), int(d)), color[i].tolist(), 2)
+
         frame = cv.circle(frame, (int(a), int(b)), 5, color[i].tolist(), -1)
     img = cv.add(frame, mask)
     cv.imshow('frame', img)
