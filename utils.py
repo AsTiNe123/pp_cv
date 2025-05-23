@@ -12,7 +12,6 @@ def is_point_in_polygon(point, polygon):
     return cv2.pointPolygonTest(np.array(polygon), point, False) >= 0
 
 def estimate_speed(p1, p2, fps, pixels_per_meter, factor_declinis):
-    """Расчет скорости объекта"""
     distance_pixels = np.linalg.norm(np.array(p2) - np.array(p1))
     distance_meters = distance_pixels / pixels_per_meter * factor_declinis
     return distance_meters * fps * 3.6  # км/ч
