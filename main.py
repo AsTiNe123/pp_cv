@@ -1,118 +1,72 @@
-from ultralytics import YOLO
 import cv2
-import math
 import time
-import numpy as np
+from ultralytics import YOLO
+from config import SCALED_SIZE
+from roi_manager import ROIManager
+from visualization import Visualizer
+from utils import scale_points, estimate_speed
+from config import ROI_CONFIG, PIXELS_PER_METER, FACTOR_DECLINIS
 
-# Настройки
-ROI_LIST = [
-    {
-        "name": "ROI 1",
-        "points": [(0, 350), (320, 350), (225, 480), (0, 480)],
-        "color": (0, 255, 0)
-    },
-    {
-        "name": "ROI 2",
-        "points": [(320, 350), (225, 480), (640, 480), (640, 350)],
-        "color": (0, 0, 255)
-    }
-]  # Список ROI с полигонами
+def main():
+    # Инициализация
+    model = YOLO("models/epoch7.pt")
+    cap = cv2.VideoCapture("video/traffic3.mp4")
+    roi_manager = ROIManager([{**roi, "points": scale_points(roi["points"])} 
+                            for roi in ROI_CONFIG])
 
-PIXELS_PER_METER = 3
-FACTOR_DECLINIS = 5
+    visualizer = Visualizer()
+    
+    prev_time = time.time()
+    start_time = time.time()
 
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-def estimate_speed(p1, p2, fps):
-    distance_pixels = math.sqrt((p2[0] - p1[0]) ** 2 + (p2[1] - p1[1]) ** 2)
-    distance_meters = distance_pixels / PIXELS_PER_METER
-    distance_meters *= FACTOR_DECLINIS
-    return distance_meters * fps * 3.6  # км/ч
+        # Подготовка кадра
+        frame = cv2.resize(frame, SCALED_SIZE)
+        combined_frame = visualizer.create_display()
+        combined_frame[:SCALED_SIZE[1], :] = frame
+        
+        # Расчет FPS
+        current_time = time.time()
+        fps = 1 / (current_time - prev_time)
+        prev_time = current_time
+        elapsed_time = current_time - start_time
 
+        # Сброс счетчиков
+        roi_manager.update_counts()
 
-def is_point_in_polygon(point, polygon):
-    """Проверяет, находится ли точка внутри полигона"""
-    return cv2.pointPolygonTest(np.array(polygon), point, False) >= 0
+        # Детекция и трекинг
+        results = model.track(frame, persist=True, tracker="bytetrack.yaml")
+        lane_colors = []
+        boxes = []
 
+        if results[0].boxes.id is not None:
+            det_boxes = results[0].boxes.xywh.cpu()
+            track_ids = results[0].boxes.id.int().cpu().tolist()
 
-model = YOLO("epoch7.pt")
-cap = cv2.VideoCapture("video/traffic3.mp4")
+            for box, track_id in zip(det_boxes, track_ids):
+                roi, lane = roi_manager.process_detection(box, track_id, fps, current_time)
+                if roi:
+                    boxes.append(box)
+                    lane_colors.append(lane["color"] if lane else roi["color"])
 
-# Подготовка данных ROI
-for roi in ROI_LIST:
-    roi["polygon"] = np.array(roi["points"], dtype=np.int32)
-    roi["track_history"] = {}
-    roi["speeds"] = []
+        # Обновление статистики
+        roi_manager.update_flow_rates(current_time)
 
-prev_time = time.time()
+        # Отрисовка
+        visualizer.draw_rois(frame, roi_manager.rois)
+        visualizer.draw_objects(frame, boxes, lane_colors)
+        visualizer.draw_info_panel(combined_frame, roi_manager.rois, elapsed_time, fps)
 
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        break
+        cv2.imshow("Traffic Monitoring System", combined_frame)
+        if cv2.waitKey(1) == ord('q'):
+            break
 
-    frame = cv2.resize(frame, (640, 480))
-    current_time = time.time()
-    fps = 1 / (current_time - prev_time)
-    prev_time = current_time
+    cap.release()
+    cv2.destroyAllWindows()
 
-    # Рисуем все ROI (полигоны)
-    for roi in ROI_LIST:
-        cv2.polylines(frame, [roi["polygon"]], True, roi["color"], 2)
-        cv2.putText(frame, roi["name"], tuple(roi["points"][0]),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, roi["color"], 2)
-
-    # Детекция и трекинг
-    results = model.track(frame, persist=True, tracker="bytetrack.yaml")
-
-    if results[0].boxes.id is not None:
-        boxes = results[0].boxes.xywh.cpu()
-        track_ids = results[0].boxes.id.int().cpu().tolist()
-
-        for box, track_id in zip(boxes, track_ids):
-            x_center, y_center, w, h = box
-            center_point = (float(x_center), float(y_center))
-            x1, y1 = int(x_center - w / 2), int(y_center - h / 2)
-            x2, y2 = int(x_center + w / 2), int(y_center + h / 2)
-
-            # Проверяем каждый ROI
-            for roi in ROI_LIST:
-                if is_point_in_polygon(center_point, roi["polygon"]):
-                    # Инициализация истории для трека
-                    if track_id not in roi["track_history"]:
-                        roi["track_history"][track_id] = []
-
-                    # Добавляем текущую позицию
-                    roi["track_history"][track_id].append(center_point)
-
-                    # Расчет скорости
-                    speed = 0
-                    if len(roi["track_history"][track_id]) > 1:
-                        prev_pos = roi["track_history"][track_id][-2]
-                        curr_pos = roi["track_history"][track_id][-1]
-                        speed = estimate_speed(prev_pos, curr_pos, fps=fps)
-                        roi["speeds"].append(speed)  # Сохраняем скорость для ROI
-
-                    # Рисуем информацию для объекта
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), roi["color"], 2)
-                    cv2.putText(frame, f"{speed:.1f}", (x1, y1 - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, roi["color"], 2)
-                    break  # Выходим из цикла проверки ROI после первого совпадения
-
-    # Отображаем статистику для каждого ROI
-    stat_y = 30
-    for roi in ROI_LIST:
-        if roi["speeds"]:
-            # Усредняем скорость за последние N измерений
-            recent_speeds = roi["speeds"][-10:] if len(roi["speeds"]) > 10 else roi["speeds"]
-            avg_speed = np.mean(recent_speeds)
-
-            cv2.putText(frame, f"{roi['name']}: {avg_speed:.1f} km/h",
-                        (10, stat_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, roi["color"], 2)
-            stat_y += 30
-
-    cv2.imshow("Polygon ROI Speed Estimation", frame)
-    if cv2.waitKey(1) == ord('q'):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    main()
